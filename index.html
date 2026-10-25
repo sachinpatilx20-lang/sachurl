@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SACH.IN</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="theme-color" content="#000000">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 560px; margin: 32px auto; padding: 0 16px; }
+  input { width: 100%; padding: 10px; font: inherit; box-sizing: border-box; }
+  #status { color: #666; font-size: 14px; min-height: 1.4em; margin: 6px 0 0; }
+  .item { position: relative; display: flex; flex-direction: column; gap: 10px; padding: 16px 0; border-bottom: 1px solid #ddd; }
+  .item a.thumbwrap { display: block; aspect-ratio: 16 / 9; background: #eee; border-radius: 8px; overflow: hidden; }
+  .item img.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .item .info { min-width: 0; }
+  .item a.t { font-weight: 700; color: inherit; overflow-wrap: anywhere; }
+  .item small { display: block; color: #666; overflow-wrap: anywhere; }
+  .item small b { color: #333; font-weight: 600; }
+  .item button { position: absolute; top: 24px; right: 8px; width: 32px; height: 32px; border-radius: 50%; background: rgba(0,0,0,.65); border: 0; color: #fff; cursor: pointer; font-size: 18px; line-height: 1; }
+</style>
+</head>
+<body>
+
+<input id="u" type="url" placeholder="Paste a video link" autofocus>
+<p id="status"></p>
+<div id="list"></div>
+
+<script>
+const KEY = "saved-links";
+const input = document.getElementById("u");
+const status = document.getElementById("status");
+const list = document.getElementById("list");
+let items = [];
+try { items = JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) {}
+
+function persist() { try { localStorage.setItem(KEY, JSON.stringify(items)); } catch (e) {} }
+
+// every field Microlink returns that is worth keeping
+function pick(data) {
+  const m = (o) => (o && o.url) || "";
+  return {
+    title: data.title || "",
+    description: data.description || "",
+    publisher: data.publisher || "",
+    author: data.author || "",
+    date: data.date || "",
+    lang: data.lang || "",
+    canonical: data.url || "",
+    image: m(data.image),
+    logo: m(data.logo),
+    video: m(data.video),
+    audio: m(data.audio)
+  };
+}
+
+function render() {
+  list.replaceChildren();
+  items.forEach((it) => {
+    const row = document.createElement("div"); row.className = "item";
+    const thumb = it.image || (youtubeId(it.url) ? "https://i.ytimg.com/vi/" + youtubeId(it.url) + "/hqdefault.jpg" : "");
+    if (thumb) {
+      const wrap = document.createElement("a"); wrap.className = "thumbwrap"; wrap.href = it.url; wrap.target = "_blank"; wrap.rel = "noopener";
+      const img = document.createElement("img"); img.className = "thumb"; img.src = thumb; img.alt = ""; img.loading = "lazy";
+      img.onerror = () => wrap.remove();
+      wrap.appendChild(img); row.appendChild(wrap);
+    }
+    const box = document.createElement("div"); box.className = "info";
+    const a = document.createElement("a"); a.className = "t"; a.href = it.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = it.title || it.url;
+    box.appendChild(a);
+    [["Description", it.description], ["Publisher", it.publisher], ["Author", it.author],
+     ["Date", it.date && new Date(it.date).toLocaleDateString()], ["Language", it.lang],
+     ["Canonical", it.canonical], ["Thumbnail", it.image], ["Logo", it.logo],
+     ["Video", it.video], ["Audio", it.audio]].forEach(([k, v]) => {
+      if (!v) return;
+      const s = document.createElement("small");
+      const b = document.createElement("b"); b.textContent = k + ": ";
+      s.append(b, document.createTextNode(v));
+      box.appendChild(s);
+    });
+    const del = document.createElement("button"); del.textContent = "×"; del.title = "Remove";
+    del.onclick = () => { items = items.filter((x) => x.url !== it.url); persist(); render(); };
+    row.append(box, del);
+    list.appendChild(row);
+  });
+}
+
+function getJSON(endpoint, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms || 10000);
+  return fetch(endpoint, { signal: ctrl.signal })
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .finally(() => clearTimeout(timer));
+}
+
+function youtubeId(url) {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.replace(/^www\.|^m\./, "");
+    if (h === "youtu.be") return u.pathname.slice(1).split("/")[0];
+    if (h.endsWith("youtube.com")) {
+      if (u.searchParams.get("v")) return u.searchParams.get("v");
+      const m = u.pathname.match(/^\/(shorts|embed|live)\/([\w-]+)/);
+      if (m) return m[2];
+    }
+  } catch (e) {}
+  return "";
+}
+
+// Tries Microlink first, then noembed (YouTube, Vimeo and more), then builds what it can from the link itself.
+async function lookup(url) {
+  const errors = [];
+  try {
+    const response = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(url)}`);
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const json = await response.json();
+    if (json.status === "success" && json.data) return { data: pick(json.data), via: "Microlink" };
+    throw new Error(json.message || "no data");
+  } catch (e) { errors.push("Microlink: " + e.message); }
+
+  try {
+    const j = await getJSON("https://noembed.com/embed?url=" + encodeURIComponent(url));
+    if (j && j.title) {
+      return { data: { title: j.title, author: j.author_name || "", publisher: j.provider_name || "", image: j.thumbnail_url || "", canonical: j.url || "" }, via: "noembed" };
+    }
+    throw new Error(j && j.error ? j.error : "no data");
+  } catch (e) { errors.push("noembed: " + e.message); }
+
+  const id = youtubeId(url);
+  const partial = id ? { image: "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg", publisher: "YouTube" } : {};
+  return { data: partial, via: "", errors };
+}
+
+async function handle(url) {
+  if (items.some((x) => x.url === url)) { status.textContent = "Already saved."; input.value = ""; return; }
+  status.textContent = "Fetching...";
+  const res = await lookup(url);
+  const d = Object.assign({ title: "", description: "", publisher: "", author: "", date: "", lang: "", canonical: "", image: "", logo: "", video: "", audio: "" }, res.data);
+  items.unshift(Object.assign({ url, savedAt: Date.now() }, d));
+  persist(); render();
+  status.textContent = res.via
+    ? "Saved (details from " + res.via + ")."
+    : "Saved, but details could not be loaded. " + res.errors.join(" | ") +
+      (location.protocol === "file:" || location.protocol.startsWith("http") ? "" : " Open this page in a normal browser tab.");
+  input.value = "";
+}
+
+let timer;
+function check() {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    const v = input.value.trim();
+    try { const u = new URL(v); if (u.protocol === "http:" || u.protocol === "https:") handle(u.href); } catch (e) {}
+  }, 400);
+}
+input.addEventListener("input", check);
+input.addEventListener("paste", check);
+
+render();
+</script>
+</body>
+</html>
